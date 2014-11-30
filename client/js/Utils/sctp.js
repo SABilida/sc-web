@@ -21,8 +21,6 @@ var SctpCommandType = {
     SCTP_CMD_FIND_ELEMENT_BY_SYSITDF:   0xa0, // return sc-element by it system identifier
     SCTP_CMD_SET_SYSIDTF:       0xa1, // setup new system identifier for sc-element
     SCTP_CMD_STATISTICS:        0xa2, // return usage statistics from server
-
-    SCTP_CMD_SHUTDOWN:          0xfe // disconnect client from server
 };
 
 
@@ -54,12 +52,88 @@ var SctpEventType = {
     SC_EVENT_REMOVE_ELEMENT:     4
 }
 
+var sc_addr_size = 4;
+var sctp_header_size = 10;
+
 sc_addr_from_id = function(sc_id) {
     var a = sc_id.split("_");
     var seg = parseInt(a[0]);
     var offset = parseInt(a[1]);
     
     return (seg << 16) | offset;
+}
+
+sc_addr_to_id = function(addr) {
+    return (addr & 0xFFFF).toString() + '_' + ((addr >> 16) & 0xFFFF).toString();
+}
+
+function SctpCommandBuffer(size) {
+    var b, pos = 0,
+        view = new DataView(new ArrayBuffer(size + sctp_header_size));
+    
+    return b = {
+        
+        writeUint8: function(v) {
+            view.setUint8(pos, v, true);
+            pos += 1;
+        },
+        
+        writeUint32: function(v) {
+            view.setUint32(pos, v, true);
+            pos += 4;
+        },
+        
+        writeBuffer: function(buff) {
+            var dstU8 = new Uint8Array(view.buffer, pos);
+            var srcU8 = new Uint8Array(buff);
+            dstU8.set(srcU8);
+            pos += buff.byteLength;
+        },
+        
+        data: function() {
+            return view.buffer;
+        },
+        
+        setHeader: function(cmd, flags, id, size) {
+            this.writeUint8(cmd);
+            this.writeUint8(flags);
+            this.writeUint32(id);
+            this.writeUint32(size);
+        }
+    };
+};
+
+function SctpResultBuffer(v) {
+    var view = v;
+    
+    return {
+        
+        getCmd: function() {
+            return v.getUint8(0, true);
+        },
+        getId: function() {
+            return v.getUint32(1, true);
+        },
+        getResultCode: function() {
+            return v.getUint8(5, true);
+        },
+        getResultSize: function() {
+            return v.getUint32(6, true);
+        },
+        getHeaderSize: function() {
+            return sctp_header_size;
+        },
+        
+        getResUint8: function(offset) {
+            return view.getUint8(sctp_header_size + offset, true);
+        },
+        getResUint16: function(offset) {
+            return view.getUint16(sctp_header_size + offset, true);
+        },
+        getResUint32: function(offset) {
+            return view.getUint32(sctp_header_size + offset, true);
+        }
+    };
 }
 
 SctpClient = function() {
@@ -71,12 +145,13 @@ SctpClient = function() {
 }
 
 SctpClient.prototype.connect = function(url, success) {
-    this.socket = new SockJS(url);
+    this.socket = new WebSocket('ws://' + window.location.host + '/sctp'/*, ['soap', 'xmpp']*/);
+    this.socket.binaryType = 'arraybuffer';
 
     var self = this;
     this.socket.onopen = function() {
+        console.log('Connected to websocket');
         success();
-        console.log('open');
         
         var emit_events = function() {
             if (self.event_timeout != 0)
@@ -96,7 +171,10 @@ SctpClient.prototype.connect = function(url, success) {
         console.log('message', e.data);
     };
     this.socket.onclose = function() {
-        console.log('close');
+        console.log('Closed websocket connection');
+    };
+    this.socket.onerror = function(e) {
+        console.log('WebSocket Error ' + e);
     };
     
 }
@@ -108,16 +186,17 @@ SctpClient.prototype._push_task = function(task) {
     
     function process() {
         var t = self.task_queue.shift();
+        
         self.socket.onmessage = function(e) {
-            var str = e.data;
-            var obj = !(/[^,:{}\[\]0-9.\-+Eaeflnr-u \n\r\t]/.test(
-                        str.replace(/"(\\.|[^"\\])*"/g, ''))) &&
-                        eval('(' + str + ')');
             
-            if (obj.resCode == SctpResultCode.SCTP_RESULT_OK) {
-                t.dfd.resolve(obj);
+            var result = new SctpResultBuffer(new DataView(e.data));
+            if (result.getResultSize() != e.data.byteLength - result.getHeaderSize())
+                throw "Invalid data size " + l
+            
+            if (e && e.data && result.getResultCode() == SctpResultCode.SCTP_RESULT_OK) {
+                t.dfd.resolve(t.parse ? t.parse(result) : result);
             } else
-                t.dfd.reject(obj);
+                t.dfd.reject();
             
             if (self.task_queue.length > 0)
                 self.task_timeout = window.setTimeout(process, this.task_frequency)
@@ -129,7 +208,6 @@ SctpClient.prototype._push_task = function(task) {
         }
 
         self.socket.send(t.message);
-            
     }
     
     if (!this.task_timeout) {
@@ -137,10 +215,11 @@ SctpClient.prototype._push_task = function(task) {
     }
 };
 
-SctpClient.prototype.new_request = function(message) {
+SctpClient.prototype.new_request = function(message, parseFn) {
     var dfd = new jQuery.Deferred();
     this._push_task({
-        message: JSON.stringify(message),
+        message: message,
+        parse: parseFn,
         dfd: dfd
     });
     return dfd.promise();
@@ -152,40 +231,25 @@ SctpClient.prototype.erase_element = function(addr) {
 
 
 SctpClient.prototype.check_element = function(addr) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_CHECK_ELEMENT, 
-        args: [addr]
-    });
+    throw "Not supported";
 };
 
 
 SctpClient.prototype.get_element_type = function(addr) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_GET_ELEMENT_TYPE,
-        args: [addr]
-    });
+    throw "Not supported";
 };
 
 SctpClient.prototype.get_arc = function(addr) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_GET_ARC,
-        args: [addr]
-    });
+    throw "Not supported";
 };
 
 SctpClient.prototype.create_node = function(type) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_CREATE_NODE,
-        args: [type]
-    });
+   throw "Not supported";
 };
 
 
 SctpClient.prototype.create_arc = function(type, src, trg) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_CREATE_ARC,
-        args: [type, src, trg]
-    });
+    throw "Not supported";
 };
 
 
@@ -200,10 +264,7 @@ SctpClient.prototype.set_link_content = function(addr, data) {
 
 
 SctpClient.prototype.get_link_content = function(addr) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_GET_LINK_CONTENT,
-        args: [addr]
-    });
+    throw "Not supported";
 };
 
 
@@ -213,17 +274,22 @@ SctpClient.prototype.find_links_with_content = function(data) {
 
 
 SctpClient.prototype.iterate_elements = function(iterator_type, args) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_ITERATE_ELEMENTS,
-        args: [iterator_type].concat(args)
-    });
+    throw "Not supported";
 };
 
 
 SctpClient.prototype.find_element_by_system_identifier = function(data) {
-    return this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_FIND_ELEMENT_BY_SYSITDF, 
-        args: [data]
+    var buffData = String2ArrayBuffer(data);
+    var buffer = new SctpCommandBuffer(buffData.byteLength + 4);
+    buffer.setHeader(SctpCommandType.SCTP_CMD_FIND_ELEMENT_BY_SYSITDF, 0, 0, buffData.byteLength + 4);
+    buffer.writeUint32(buffData.byteLength);
+    buffer.writeBuffer(buffData);
+    
+    return this.new_request(buffer.data(), function(data) {
+        return {
+            resCode: data.getResultCode(),
+            result: sc_addr_to_id(data.getResUint32(0))
+        };
     });
 };
 
@@ -233,7 +299,7 @@ SctpClient.prototype.set_system_identifier = function(addr, idtf) {
 };
 
 SctpClient.prototype.event_create = function(evt_type, addr, callback) {
-    var dfd = new jQuery.Deferred();
+   /* var dfd = new jQuery.Deferred();
     var self = this;
     this.new_request({
         cmdCode: SctpCommandType.SCTP_CMD_EVENT_CREATE,
@@ -243,13 +309,14 @@ SctpClient.prototype.event_create = function(evt_type, addr, callback) {
         dfd.resolve(data);
     }).fail(function(data) {
         dfd.reject(data);
-    });
+    });*/
+    throw "Not supported";
     
     return dfd.promise();
 };
 
 SctpClient.prototype.event_destroy = function(evt_id) {
-    var dfd = new jQuery.Deferred();
+    /*var dfd = new jQuery.Deferred();
     var self = this;
     
     this.new_request({
@@ -260,7 +327,8 @@ SctpClient.prototype.event_destroy = function(evt_id) {
         dfd.promise(data.result);
     }).fail(function(data){ 
         dfd.reject(data);
-    });
+    });*/
+    throw "Not supported";
     
     return dfd.promise();
 };
@@ -268,24 +336,27 @@ SctpClient.prototype.event_destroy = function(evt_id) {
 SctpClient.prototype.event_emit = function() {
     var dfd = new jQuery.Deferred();
     var self = this;
-    this.new_request({
-        cmdCode: SctpCommandType.SCTP_CMD_EVENT_EMIT
-    }).done(function (data) {
-        
-        for (e in data.result) {
-            var evt = data.result[e];
-            
-            evt_id = evt[0];
-            addr = evt[1];
-            arg = evt[2];
+    
+    var buffer = new SctpCommandBuffer(0);
+    buffer.setHeader(SctpCommandType.SCTP_CMD_EVENT_EMIT, 0, 0, 0);
+    
+    this.new_request(buffer.data())
+    .done(function (data) {
+        var n = data.getResUint32(0);
+        for (var i = 0; i < n; ++i) {
+            evt_id = data.getResUint32(4 + i * 16);
+            addr = data.getResUint32(8 + i * 16);
+            arg = data.getResUint32(12 + i * 16);
             var func = self.events[evt_id];
-            
+
             if (func)
                 func(addr, arg);
         }
+        dfd.resolve();
     }).fail(function(data) {
         dfd.reject();
-    });
+    });;
+
     return dfd.promise();
 };
 

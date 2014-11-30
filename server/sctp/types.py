@@ -57,8 +57,6 @@ class SctpCommandType:
     SCTP_CMD_SET_SYSIDTF        = 0xa1   # setup new system identifier for sc-element
     SCTP_CMD_STATISTICS         = 0xa2 # return usage statistics from server
 
-    SCTP_CMD_SHUTDOWN           = 0xfe # disconnect client from server
-
 
 class SctpResultCode:
     SCTP_RESULT_OK              = 0x00 #
